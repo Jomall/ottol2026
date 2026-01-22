@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<head><title>Results</title></head>
+<body>
+    <h1>Analysis Results</h1>
+    <pre>{{ analysis }}</pre>
+    <h2>Generated Sequence: {{ sequence.numbers }} BB: {{ sequence.bb }} Letter: {{ sequence.letter }}</h2>
+    {% if sequence.sup6 %}
+    <h2>Generated SUP6 Sequence: {{ sequence.sup6.numbers }} BB: {{ sequence.sup6.bb }} Letter: {{ sequence.sup6.letter }}</h2>
+    {% endif %}
+
+    <h3>Add New Lotto Numbers to Recalibrate Predictions</h3>
+    <form action="/add_numbers" method="POST">
+        <label for="draw">Draw (e.g., 3463):</label><br>
+        <input type="text" id="draw" name="draw" pattern="\d+" required><br><br>
+        <label for="nla">NLA (5 numbers, e.g., 01-02-03-04-05):</label><br>
+        <input type="text" id="nla" name="nla" pattern="\d{2}-\d{2}-\d{2}-\d{2}-\d{2}" required><br><br>
+        <label for="bb">BB (e.g., 29):</label><br>
+        <input type="text" id="bb" name="bb" pattern="\d+" required><br><br>
+        <label for="letter">Letter (e.g., K):</label><br>
+        <input type="text" id="letter" name="letter" pattern="[A-Z]" maxlength="1" required><br><br>
+        <label for="draw_num">Draw# (e.g., 2548):</label><br>
+        <input type="text" id="draw_num" name="draw_num" pattern="\d+" required><br><br>
+        <label for="sup6">SUP6 (6 numbers and letter, e.g., 13 16 20 21 22 28 J, optional):</label><br>
+        <input type="text" id="sup6" name="sup6" pattern="[\d\s]+[A-Z]?"><br><br>
+        <input type="submit" value="Add and Recalibrate">
+    </form>
+
+    <br>
+    <a href="{{ url_for('index') }}"><button>Return Home</button></a>
+</body>
+</html>
