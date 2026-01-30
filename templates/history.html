@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head><title>Prediction History</title></head>
+<body>
+    <h1>Prediction History</h1>
+    {% if history %}
+    <table border="1">
+        <tr>
+            <th>Timestamp</th>
+            <th>NLA Prediction</th>
+            <th>SUP6 Prediction</th>
+        </tr>
+        {% for item in history %}
+        <tr>
+            <td>{{ item.timestamp }}</td>
+            <td>{{ item.nla_prediction }}</td>
+            <td>{{ item.sup6_prediction }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% else %}
+    <p>No prediction history available.</p>
+    {% endif %}
+    <br>
+    <a href="{{ url_for('index') }}"><button>Return Home</button></a>
+</body>
+</html>
