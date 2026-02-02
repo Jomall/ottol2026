@@ -2,10 +2,29 @@
 <html>
 <head><title>Results</title></head>
 <body>
-    <h1>Analysis Results</h1>
-    <pre>{{ analysis }}</pre>
-    <h2>Generated Sequence: {{ sequence.numbers }} BB: {{ sequence.bb }} Letter: {{ sequence.letter }}</h2>
-    <h2>Generated SUP6 Sequence: {% if sequence.sup6 %}{{ sequence.sup6.numbers }} BB: {{ sequence.sup6.bb }} Letter: {{ sequence.sup6.letter }}{% else %}No SUP6 prediction available{% endif %}</h2>
+<h1>Analysis Results</h1>
+{% if csv_filename %}
+<p><strong>Uploaded CSV:</strong> {{ csv_filename }}</p>
+{% endif %}
+<pre>{{ analysis }}</pre>
+<h2>Generated Sequence: {{ sequence.numbers }} BB: {{ sequence.bb }} Letter: {{ sequence.letter }}</h2>
+<h2>Generated SUP6 Sequence: {% if sequence.sup6 %}{{ sequence.sup6.numbers }} Letter: {{ sequence.sup6.letter }}{% else %}No SUP6 prediction available{% endif %}</h2>
+
+<h3>Last Uploaded Draws</h3>
+{% if last_nla %}
+<p><strong>Last NLA:</strong> {{ last_nla }}</p>
+{% else %}
+<p>No NLA draws uploaded yet.</p>
+{% endif %}
+{% if last_sup6 %}
+<p><strong>Last SUP6:</strong> {{ last_sup6 }}</p>
+{% else %}
+<p>No SUP6 draws uploaded yet.</p>
+{% endif %}
+
+<h3>Dataset Totals</h3>
+<p><strong>Total NLA Draws:</strong> {{ total_nla }}</p>
+<p><strong>Total SUP6 Draws:</strong> {{ total_sup6 }}</p>
 
     <h3>Add New NLA Numbers to Recalibrate Predictions</h3>
     <form action="/add_nla" method="POST">
@@ -33,8 +52,21 @@
     <button onclick="regenerateNLA()">Regenerate NLA Prediction</button>
     <button onclick="regenerateSUP6()">Regenerate SUP6 Prediction</button>
     <br><br>
+    <a href="{{ url_for('search') }}"><button>Search by Draw Number</button></a>
     <a href="{{ url_for('history') }}"><button>View Prediction History</button></a>
     <a href="{{ url_for('index') }}"><button>Return Home</button></a>
+    <button onclick="showExitModal()">Exit Application</button>
+
+    <!-- Exit Modal -->
+    <div id="exitModal" style="display: none; position: fixed; z-index: 1; left: 0; top: 0; width: 100%; height: 100%; overflow: auto; background-color: rgba(0,0,0,0.4);">
+        <div style="background-color: #fefefe; margin: 15% auto; padding: 20px; border: 1px solid #888; width: 80%; max-width: 400px;">
+            <h2>Exit Application</h2>
+            <p>You have unsaved changes. Do you want to save your data before exiting?</p>
+            <button onclick="saveAndExit()">Save and Exit</button>
+            <button onclick="exitWithoutSave()">Exit without Save</button>
+            <button onclick="cancelExit()">Cancel</button>
+        </div>
+    </div>
 
     <script>
         function regenerateNLA() {
@@ -53,6 +85,30 @@
                         document.querySelectorAll('h2')[1].innerText = 'Generated SUP6 Sequence: ' + data.sup6.numbers + ' BB: ' + data.sup6.bb + ' Letter: ' + data.sup6.letter;
                     }
                 });
+        }
+
+        function showExitModal() {
+            document.getElementById('exitModal').style.display = 'block';
+        }
+
+        function saveAndExit() {
+            fetch('/save', { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        window.location.href = '/exit';
+                    } else {
+                        alert('Error saving data: ' + data.message);
+                    }
+                });
+        }
+
+        function exitWithoutSave() {
+            window.location.href = '/exit';
+        }
+
+        function cancelExit() {
+            document.getElementById('exitModal').style.display = 'none';
         }
     </script>
 </body>

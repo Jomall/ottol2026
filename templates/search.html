@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html>
+<head><title>Search by Draw Number</title></head>
+<body>
+    <h1>Search for NLA and SUP6 by Draw Number</h1>
+    <form method="POST">
+        <label for="draw">Draw Number:</label><br>
+        <input type="text" id="draw" name="draw" pattern="\d+" required><br><br>
+        <input type="submit" value="Search">
+    </form>
+    {% if results %}
+        <h2>Results for Draw {{ draw }}</h2>
+        {% if results.nla %}
+            <p><strong>NLA:</strong> {{ results.nla }}</p>
+        {% else %}
+            <p>No NLA found for this draw.</p>
+        {% endif %}
+        {% if results.sup6 %}
+            <p><strong>SUP6:</strong> {{ results.sup6 }}</p>
+        {% else %}
+            <p>No SUP6 found for this draw.</p>
+        {% endif %}
+    {% endif %}
+    {% if message %}
+        <p>{{ message }}</p>
+    {% endif %}
+    <br>
+    <a href="{{ url_for('index') }}"><button>Return Home</button></a>
+    {% if global_df_exists %}
+        <a href="{{ url_for('results') }}"><button>Back to Results</button></a>
+    {% endif %}
+    <button onclick="showExitModal()">Exit Application</button>
+
+    <!-- Exit Modal -->
+    <div id="exitModal" style="display: none; position: fixed; z-index: 1; left: 0; top: 0; width: 100%; height: 100%; overflow: auto; background-color: rgba(0,0,0,0.4);">
+        <div style="background-color: #fefefe; margin: 15% auto; padding: 20px; border: 1px solid #888; width: 80%; max-width: 400px;">
+            <h2>Exit Application</h2>
+            <p>You have unsaved changes. Do you want to save your data before exiting?</p>
+            <button onclick="saveAndExit()">Save and Exit</button>
+            <button onclick="exitWithoutSave()">Exit without Save</button>
+            <button onclick="cancelExit()">Cancel</button>
+        </div>
+    </div>
+
+    <script>
+        function showExitModal() {
+            document.getElementById('exitModal').style.display = 'block';
+        }
+
+        function saveAndExit() {
+            fetch('/save', { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        window.location.href = '/exit';
+                    } else {
+                        alert('Error saving data: ' + data.message);
+                    }
+                });
+        }
+
+        function exitWithoutSave() {
+            window.location.href = '/exit';
+        }
+
+        function cancelExit() {
+            document.getElementById('exitModal').style.display = 'none';
+        }
+    </script>
+</body>
+</html>

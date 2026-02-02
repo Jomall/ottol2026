@@ -1,36 +1,53 @@
 
-from flask import Flask, request, render_template, redirect, url_for
+from flask import Flask, request, render_template, redirect, url_for, send_file
 import pandas as pd
 import numpy as np
 from sklearn.cluster import KMeans
-from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
+from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier, GradientBoostingRegressor, GradientBoostingClassifier
 from sklearn.model_selection import train_test_split
 import os
 import random
+# from tensorflow.keras.models import Sequential
+# from tensorflow.keras.layers import LSTM, Dropout, Dense
+# from tensorflow.keras.optimizers import Adam
 
 app = Flask(__name__)
-app.config['UPLOAD_FOLDER'] = 'uploads/'
+app.config['UPLOAD_FOLDER'] = os.path.join(os.path.dirname(__file__), 'uploads')
 
 # Global variables to store data and model
 global_df = None
 global_model = None
 global_kmeans = None
+global_csv_path = None
+global_csv_filename = None
+global_current_sequence = None
+global_unsaved_changes = False
+
+# Persistent save path
+SAVE_PATH = r'C:\Users\jomal\OneDrive\Documents\reconstructed_lotto.csv'
+
+def load_saved_data():
+    save_path = r'C:\Users\jomal\OneDrive\Documents\reconstructed_lotto.csv'
+    if os.path.exists(save_path):
+        return load_existing_df(save_path)
+    return None
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
+    global global_df, global_model, global_kmeans, global_csv_path, global_csv_filename
     if request.method == 'POST':
         file = request.files['file']
         if file and file.filename.endswith('.csv'):
             os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-            filepath = os.path.join(app.config['UPLOAD_FOLDER'], file.filename)
+            filepath = os.path.abspath(os.path.join(app.config['UPLOAD_FOLDER'], file.filename))
             file.save(filepath)
 
             # Load and validate data
             df = pd.read_csv(filepath)
             if 'NLA' not in df.columns:
                 return "Error: CSV must have a column named 'NLA'."
-            if len(df) < 10:
-                return "Error: CSV must have at least 10 rows."
+            if len(df) < 1:
+                return "Error: CSV must have at least 1 row."
 
             # Parse NLA column to extract 5 numbers, BB, and Letter per row
             parsed_data = []
@@ -44,8 +61,8 @@ def index():
                 if len(numbers) < 5:
                     return f"Error: Row '{nla}' does not contain at least 5 numbers."
                 nums = [int(n) for n in numbers[:5]]
-                if not all(1 <= n <= 36 for n in nums):
-                    return f"Error: Numbers in '{nla}' must be between 1 and 36."
+                if not all(0 <= n <= 36 for n in nums):
+                    return f"Error: Numbers in '{nla}' must be between 0 and 36."
                 # Extract BB and Letter, add defaults if missing
                 bb_match = re.search(r'BB[:\-]\s*(\d+)', nla)
                 letter_match = re.search(r'Letter:\s*([A-Z])', nla)
@@ -53,41 +70,85 @@ def index():
                 letter = letter_match.group(1) if letter_match else 'A'
 
                 # Parse SUP6 if present
-                sup_parsed = [0] * 8  # 6 nums + bb + letter
+                sup_parsed = ['00'] * 6 + ['A']  # 6 nums + letter
                 if 'SUP6' in df.columns and not pd.isna(row['SUP6']) and isinstance(row['SUP6'], str):
                     sup6 = row['SUP6']
                     numbers_sup = re.findall(r'\d+', sup6)
                     if len(numbers_sup) >= 6:
-                        nums_sup = [int(n) for n in numbers_sup[:6]]
-                        if all(1 <= n <= 36 for n in nums_sup):
-                            bb_match_sup = re.search(r'BB[:\-]\s*(\d+)', sup6)
+                        nums_sup = [n.zfill(2) for n in numbers_sup[:6]]
+                        if all(1 <= int(n) <= 36 for n in nums_sup):
                             letter_match_sup = re.search(r'Letter:\s*([A-Z])', sup6)
-                            bb_sup = int(bb_match_sup.group(1)) if bb_match_sup else 1
                             letter_sup = letter_match_sup.group(1) if letter_match_sup else 'A'
-                            sup_parsed = nums_sup + [bb_sup, letter_sup]
+                            # Check for letter at the end if not found in regex
+                            if letter_match_sup is None:
+                                parts = sup6.split()
+                                for part in reversed(parts):
+                                    if part.isalpha() and len(part) == 1:
+                                        letter_sup = part.upper()
+                                        break
+                            sup_parsed = nums_sup + [letter_sup]
 
                 # Include Draw and Draw# if available
                 draw_val = row.get('Draw ', None)
                 draw_num_val = row.get('Draw#', None)
                 parsed_data.append([draw_val, draw_num_val] + nums + [bb, letter] + sup_parsed)
-            df = pd.DataFrame(parsed_data, columns=['Draw', 'Draw#', 'Num1', 'Num2', 'Num3', 'Num4', 'Num5', 'BB', 'Letter', 'Sup1', 'Sup2', 'Sup3', 'Sup4', 'Sup5', 'Sup6', 'SupBB', 'SupLetter'])
+            new_df = pd.DataFrame(parsed_data, columns=['Draw', 'Draw#', 'Num1', 'Num2', 'Num3', 'Num4', 'Num5', 'BB', 'Letter', 'Sup1', 'Sup2', 'Sup3', 'Sup4', 'Sup5', 'Sup6', 'SupLetter'])
+
+            # Load existing data from SAVE_PATH and append new data without duplicates
+            global_csv_path = SAVE_PATH  # Always save to persistent path
+            global_csv_filename = file.filename  # Save the filename for display
+            existing_df = load_existing_df(SAVE_PATH)
+            if not existing_df.empty:
+                combined_df = pd.concat([existing_df, new_df], ignore_index=True)
+                # Drop duplicates based on Draw and Draw# to avoid duplicate entries
+                global_df = combined_df.drop_duplicates(subset=['Draw', 'Draw#'], keep='first').reset_index(drop=True)
+            else:
+                global_df = new_df.copy()
 
             # Store globally for recalibration
-            global global_df, global_model, global_kmeans
-            global_df = df.copy()
+            global_model = None
+            global_kmeans = None
 
             # Analysis
-            analysis = analyze_patterns(df)
+            analysis = analyze_patterns(global_df)
 
             # ML and Generation
-            generated_sequence, model, kmeans = generate_sequence(df)
+            generated_sequence, model, kmeans = generate_sequence(global_df)
             global_model = model
             global_kmeans = kmeans
+            global_current_sequence = generated_sequence
+
+            # Save updated data to SAVE_PATH
+            try:
+                convert_df_to_sample_format(global_df).to_csv(SAVE_PATH, index=False)
+            except Exception as e:
+                print(f"Error saving to {SAVE_PATH}: {e}")
 
             # Save prediction to history
             save_prediction_to_history(generated_sequence)
 
-            return render_template('results.html', analysis=analysis, sequence=generated_sequence)
+            # Calculate last NLA and SUP6, and totals
+            last_nla = None
+            last_sup6 = None
+            total_nla = 0
+            total_sup6 = 0
+
+            if not global_df.empty:
+                # Last NLA: row with max Draw
+                nla_rows = global_df[global_df['Draw'].notna()]
+                if not nla_rows.empty:
+                    last_nla_row = nla_rows.loc[nla_rows['Draw'].idxmax()]
+                    last_nla = f"Draw {int(last_nla_row['Draw'])}: {int(last_nla_row['Num1'])} {int(last_nla_row['Num2'])} {int(last_nla_row['Num3'])} {int(last_nla_row['Num4'])} {int(last_nla_row['Num5'])} BB: {int(last_nla_row['BB'])} Letter: {last_nla_row['Letter']}"
+                    total_nla = len(nla_rows)
+
+                # Last SUP6: row with max Draw#
+                sup6_rows = global_df[global_df['Draw#'].notna()]
+                if not sup6_rows.empty:
+                    last_sup6_row = sup6_rows.loc[sup6_rows['Draw#'].idxmax()]
+                    last_sup6 = f"Draw# {int(last_sup6_row['Draw#'])}: {last_sup6_row['Sup1']} {last_sup6_row['Sup2']} {last_sup6_row['Sup3']} {last_sup6_row['Sup4']} {last_sup6_row['Sup5']} {last_sup6_row['Sup6']} Letter: {last_sup6_row['SupLetter']}"
+                    total_sup6 = len(sup6_rows)
+
+            return render_template('results.html', analysis=analysis, sequence=generated_sequence, csv_filename=global_csv_filename, last_nla=last_nla, last_sup6=last_sup6, total_nla=total_nla, total_sup6=total_sup6)
     return render_template('index.html')
 
 def analyze_patterns(df):
@@ -118,6 +179,26 @@ def analyze_patterns(df):
     return results
 
 def generate_sequence(df):
+    # Drop rows with any NaN to avoid sklearn errors
+    df = df.dropna()
+
+    # If not enough data, return a random sequence
+    if len(df) < 2:
+        new_seq = random.sample(range(1, 37), 5)
+        pred_bb = random.randint(1, 36)
+        pred_letter = random.choice(['A', 'B', 'C', 'D', 'E'])
+        return {'numbers': new_seq, 'bb': pred_bb, 'letter': pred_letter, 'sup6': None}, None, None
+
+    # Convert numeric columns to regular int/float to avoid nullable types
+    numeric_cols = ['Num1', 'Num2', 'Num3', 'Num4', 'Num5', 'BB']
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = df[col].astype(int)
+    if 'Draw' in df.columns:
+        df['Draw'] = df['Draw'].astype(int)
+    if 'Draw#' in df.columns:
+        df['Draw#'] = df['Draw#'].astype(int)
+
     # Prepare data for ML
     # For supervised: Predict each position based on previous (simple chain)
     X = []
@@ -127,14 +208,15 @@ def generate_sequence(df):
     y_letter = []
     X_sup = []
     y_sup = []
-    X_sup_bb_letter = []
-    y_sup_bb = []
+    X_sup_letter = []
     y_sup_letter = []
+    sequences = []
     for i in range(len(df) - 1):
-        seq = df.iloc[i][['Num1', 'Num2', 'Num3', 'Num4', 'Num5']].values.tolist()
+        seq = df.iloc[i, 2:7].values.tolist()
         next_seq = df.iloc[i+1]
+        sequences.append(seq)
         for pos in range(5):
-            X.append((seq[:pos] + [0] * (5 - pos)) if pos > 0 else [0] * 5)  # Features: previous positions, padded to 5
+            X.append((seq[:pos] + [0] * (9 - pos)) if pos > 0 else [0] * 9)  # Features: previous positions, padded to 9
             y.append(next_seq[pos+2])  # Target: next position's number (Num1 is column 2)
         # For BB and Letter, use the full previous sequence as features
         X_bb_letter.append(seq)
@@ -142,13 +224,14 @@ def generate_sequence(df):
         y_letter.append(next_seq['Letter'])
 
         # For SUP6, if available
-        if not pd.isna(next_seq['Sup1']) and next_seq['Sup1'] != 0:  # Assuming 0 means not parsed
-            sup_seq = df.iloc[i][['Sup1', 'Sup2', 'Sup3', 'Sup4', 'Sup5', 'Sup6']].values.tolist()
-            for pos in range(6):
-                X_sup.append((sup_seq[:pos] + [0] * (6 - pos)) if pos > 0 else [0] * 6)  # Features: previous SUP6 positions, padded to 6
-                y_sup.append(next_seq[f'Sup{pos+1}'])
-            X_sup_bb_letter.append(seq)
-            y_sup_bb.append(next_seq['SupBB'])
+        if not pd.isna(next_seq['Sup1']) and next_seq['Sup1'] != '00':  # Assuming '00' means not parsed
+            sup_values = df.iloc[i][['Sup1', 'Sup2', 'Sup3', 'Sup4', 'Sup5', 'Sup6']].values.tolist()
+            if not any(pd.isna(s) for s in sup_values):
+                sup_seq = [int(s) for s in sup_values]
+                for pos in range(6):
+                    X_sup.append((sup_seq[:pos] + [0] * (6 - pos)) if pos > 0 else [0] * 6)  # Features: previous SUP6 positions, padded to 6
+                    y_sup.append(int(next_seq[f'Sup{pos+1}']))
+            X_sup_letter.append(seq)
             y_sup_letter.append(next_seq['SupLetter'])
 
     X = np.array(X)
@@ -159,30 +242,29 @@ def generate_sequence(df):
     if len(X_sup) > 0:
         X_sup = np.array(X_sup)
         y_sup = np.array(y_sup)
-        X_sup_bb_letter = np.array(X_sup_bb_letter)
-        y_sup_bb = np.array(y_sup_bb)
         y_sup_letter = np.array(y_sup_letter)
 
     # Train a simple model (Random Forest for regression on numbers)
-    model = RandomForestRegressor(n_estimators=100)
+    model = RandomForestRegressor(n_estimators=100, random_state=42)
     model.fit(X, y)
 
     # Train model for BB
-    model_bb = RandomForestRegressor(n_estimators=100)
+    model_bb = RandomForestRegressor(n_estimators=100, random_state=42)
     model_bb.fit(X_bb_letter, y_bb)
 
     # Train model for Letter
-    model_letter = RandomForestClassifier(n_estimators=100)
+    model_letter = RandomForestClassifier(n_estimators=100, random_state=42)
     model_letter.fit(X_bb_letter, y_letter)
 
     # Train SUP6 models if data available
     if len(X_sup) > 0:
-        model_sup = RandomForestRegressor(n_estimators=100)
+        model_sup = RandomForestRegressor(n_estimators=100, random_state=42)
         model_sup.fit(X_sup, y_sup)
-        model_sup_bb = RandomForestRegressor(n_estimators=100)
-        model_sup_bb.fit(X_sup_bb_letter, y_sup_bb)
-        model_sup_letter = RandomForestClassifier(n_estimators=100)
-        model_sup_letter.fit(X_sup_bb_letter, y_sup_letter)
+        model_sup_letter = RandomForestClassifier(n_estimators=100, random_state=42)
+        model_sup_letter.fit(X_sup_letter, y_sup_letter)
+
+    # LSTM for sequence prediction (disabled for now to avoid crashes)
+    lstm_model = None
 
     # Unsupervised: Cluster sequences to find patterns
     kmeans = KMeans(n_clusters=5, random_state=42)
@@ -191,56 +273,53 @@ def generate_sequence(df):
     # Generate new sequence: Start with a random seed, predict step-by-step, bias toward high-freq numbers, ensure no duplicates
     new_seq = []
     used = set()
-    prev = [0] * 5  # Start with padded features
+    prev = [0] * 9  # Start with padded features
     for pos in range(5):
-        attempts = 0
-        while attempts < 10:  # Limit attempts to prevent infinite loop
-            pred = model.predict(np.array([prev]))[0]
-            # Bias: Adjust toward most frequent in that position
-            freq = df.iloc[:, pos + 2].value_counts()  # Num1 is column 2
-            if freq.empty:
-                top_num = 1  # Default if no data
-            else:
-                top_num = freq.idxmax()
-            # Handle NaN prediction
-            if np.isnan(pred):
-                pred = top_num  # Use top_num if prediction is NaN
-            # Blend prediction with frequency (e.g., 70% pred, 30% top freq)
-            blended = int(0.7 * pred + 0.3 * top_num)
-            blended = max(1, min(36, blended))  # Clamp to 1-36
-            if blended not in used:
-                new_seq.append(blended)
-                used.add(blended)
-                prev = new_seq + [0] * (5 - len(new_seq))  # Update prev with current sequence padded
-                break
-            else:
-                # Try next most frequent not used
-                freq_sorted = freq.sort_values(ascending=False)
-                for num in freq_sorted.index:
-                    if num not in used:
-                        blended = int(num)
-                        new_seq.append(blended)
-                        used.add(blended)
-                        prev = new_seq + [0] * (5 - len(new_seq))
-                        break
-                else:
-                    # If all frequent used, pick random available
-                    available = [n for n in range(1, 37) if n not in used]
-                    if available:
-                        blended = random.choice(available)
-                        new_seq.append(blended)
-                        used.add(blended)
-                        prev = new_seq + [0] * (5 - len(new_seq))
+        pred = model.predict(np.array([prev]))[0]
+        # Use LSTM if available for better prediction
+        if lstm_model is not None:
+            lstm_pred = lstm_model.predict(np.array([prev]).reshape(1, 5, 1))[0]
+            pred = 0.5 * pred + 0.5 * np.mean(lstm_pred)  # Blend RF and LSTM predictions
+        # Bias: Adjust toward most frequent in that position
+        freq = df.iloc[:, pos + 2].value_counts()  # Num1 is column 2
+        if freq.empty:
+            top_num = 1  # Default if no data
+        else:
+            top_num = freq.idxmax()
+        # Handle NaN prediction
+        if np.isnan(pred):
+            pred = top_num  # Use top_num if prediction is NaN
+        # Blend prediction with frequency (e.g., 70% pred, 30% top freq)
+        blended = int(0.7 * pred + 0.3 * top_num)
+        blended = max(1, min(36, blended))  # Clamp to 1-36
+        if blended not in used:
+            new_seq.append(blended)
+            used.add(blended)
+            prev = (new_seq + [0] * 9)[:9]  # Update prev with current sequence padded to 9
+        else:
+            # Try next most frequent not used
+            freq_sorted = freq.sort_values(ascending=False)
+            for num in freq_sorted.index:
+                if num not in used:
+                    blended = int(num)
+                    new_seq.append(blended)
+                    used.add(blended)
+                    prev = (new_seq + [0] * 9)[:9]
                     break
-            attempts += 1
-        if attempts >= 10:
-            # Fallback: random unique if still not found
-            available = [n for n in range(1, 37) if n not in used]
-            if available:
-                blended = random.choice(available)
-                new_seq.append(blended)
-                used.add(blended)
-                prev = new_seq + [0] * (5 - len(new_seq))
+            else:
+                # If all frequent used, pick random available
+                available = [n for n in range(1, 37) if n not in used]
+                if available:
+                    blended = random.choice(available)
+                    new_seq.append(blended)
+                    used.add(blended)
+                    prev = (new_seq + [0] * 9)[:9]
+                else:
+                    # All numbers used, pick a duplicate (shouldn't happen for 5 out of 36)
+                    blended = random.randint(1, 36)
+                    new_seq.append(blended)
+                    used.add(blended)
+                    prev = (new_seq + [0] * 9)[:9]
 
     # Predict BB and Letter based on the generated sequence
     pred_bb = model_bb.predict(np.array([new_seq]))[0]
@@ -248,15 +327,18 @@ def generate_sequence(df):
     pred_letter = model_letter.predict(np.array([new_seq]))[0]
 
     # Generate SUP6 if model available, ensure no duplicates
-    sup6 = {}
+    sup6 = None
     if len(X_sup) > 0:
         new_sup_seq = []
         used_sup = set()
-        prev_sup = [0] * 6
         for pos in range(6):
             attempts = 0
             while attempts < 10:  # Limit attempts to prevent infinite loop
-                pred_sup = float(model_sup.predict(np.array([prev_sup]))[0])
+                if pos == 0:
+                    pred_input = [0] * 6
+                else:
+                    pred_input = new_sup_seq[:pos] + [0] * (6 - pos)
+                pred_sup = float(model_sup.predict(np.array([pred_input]))[0])
                 # Bias toward freq
                 freq_sup = df.iloc[:, 9 + pos].value_counts()  # Sup1 to Sup6 are columns 9 to 14
                 if freq_sup.empty:
@@ -274,7 +356,6 @@ def generate_sequence(df):
                 if blended_sup not in used_sup:
                     new_sup_seq.append(blended_sup)
                     used_sup.add(blended_sup)
-                    prev_sup = new_sup_seq + [0] * (6 - len(new_sup_seq))
                     break
                 else:
                     # Try next most frequent not used
@@ -284,7 +365,6 @@ def generate_sequence(df):
                             blended_sup = int(num)
                             new_sup_seq.append(blended_sup)
                             used_sup.add(blended_sup)
-                            prev_sup = new_sup_seq + [0] * (6 - len(new_sup_seq))
                             break
                     else:
                         # If all frequent used, pick random available
@@ -293,7 +373,6 @@ def generate_sequence(df):
                             blended_sup = random.choice(available_sup)
                             new_sup_seq.append(blended_sup)
                             used_sup.add(blended_sup)
-                            prev_sup = new_sup_seq + [0] * (6 - len(new_sup_seq))
                         break
                 attempts += 1
             if attempts >= 10:
@@ -303,17 +382,14 @@ def generate_sequence(df):
                     blended_sup = random.choice(available_sup)
                     new_sup_seq.append(blended_sup)
                     used_sup.add(blended_sup)
-                    prev_sup = new_sup_seq + [0] * (6 - len(new_sup_seq))
-        pred_sup_bb = model_sup_bb.predict(np.array([new_seq]))[0]
-        pred_sup_bb = int(max(1, min(36, pred_sup_bb)))
         pred_sup_letter = model_sup_letter.predict(np.array([new_seq]))[0]
-        sup6 = {'numbers': new_sup_seq, 'bb': pred_sup_bb, 'letter': pred_sup_letter}
+        sup6 = {'numbers': new_sup_seq, 'letter': pred_sup_letter}
 
     return {'numbers': new_seq, 'bb': pred_bb, 'letter': pred_letter, 'sup6': sup6}, model, kmeans
 
 @app.route('/add_nla', methods=['POST'])
 def add_nla():
-    global global_df, global_model, global_kmeans
+    global global_df, global_model, global_kmeans, global_unsaved_changes
     if global_df is None:
         return redirect(url_for('index'))
 
@@ -321,22 +397,17 @@ def add_nla():
     nla = request.form.get('nla')
     bb = request.form.get('bb')
     letter = request.form.get('letter')
-    draw_num = request.form.get('draw_num')
+
+    draw_val = None
 
     message = None
 
-    # Check for duplicate Draw or Draw#
+    # Check for duplicate Draw
     if draw and draw.isdigit():
         draw_val = int(draw)
-        if draw_val in global_df['Draw'].values:
+        if draw_val in global_df['Draw'].dropna().values:
             message = f"Draw {draw_val} is already in the database. Cannot add duplicate draw."
-            return render_template('results.html', analysis=analyze_patterns(global_df), sequence={'numbers': [], 'bb': 0, 'letter': 'A', 'sup6': {}}, message=message)
-
-    if draw_num and draw_num.isdigit():
-        draw_num_val = int(draw_num)
-        if draw_num_val in global_df['Draw#'].values:
-            message = f"Draw# {draw_num_val} is already in the database. Cannot add duplicate draw#."
-            return render_template('results.html', analysis=analyze_patterns(global_df), sequence={'numbers': [], 'bb': 0, 'letter': 'A', 'sup6': {}}, message=message)
+            return render_template('results.html', analysis=analyze_patterns(global_df), sequence={'numbers': [], 'bb': 0, 'letter': 'A', 'sup6': None}, message=message)
 
     import re
     # Parse NLA, BB, Letter
@@ -348,12 +419,14 @@ def add_nla():
                 bb_val = int(bb)
                 letter_val = letter.upper()
 
-                # SUP6 defaults to zeros
-                sup_parsed = [0] * 8
+                # SUP6 defaults to '00' for missing
+                sup_parsed = ['00'] * 6 + ['A']
 
-                new_row = pd.DataFrame([[draw_val, draw_num_val] + nums + [bb_val, letter_val] + sup_parsed], columns=['Draw', 'Draw#', 'Num1', 'Num2', 'Num3', 'Num4', 'Num5', 'BB', 'Letter', 'Sup1', 'Sup2', 'Sup3', 'Sup4', 'Sup5', 'Sup6', 'SupBB', 'SupLetter'])
+                new_row = pd.DataFrame([[draw_val, None] + nums + [bb_val, letter_val] + sup_parsed], columns=['Draw', 'Draw#', 'Num1', 'Num2', 'Num3', 'Num4', 'Num5', 'BB', 'Letter', 'Sup1', 'Sup2', 'Sup3', 'Sup4', 'Sup5', 'Sup6', 'SupLetter'])
                 global_df = pd.concat([global_df, new_row], ignore_index=True)
                 message = "New NLA draw added successfully."
+                global_unsaved_changes = True
+                save_data_to_csv()
 
     # Retrain model with updated df
     analysis = analyze_patterns(global_df)
@@ -361,11 +434,32 @@ def add_nla():
     global_model = model
     global_kmeans = kmeans
 
-    return render_template('results.html', analysis=analysis, sequence=generated_sequence, message=message)
+    # Calculate last NLA and SUP6, and totals
+    last_nla = None
+    last_sup6 = None
+    total_nla = 0
+    total_sup6 = 0
+
+    if not global_df.empty:
+        # Last NLA: row with max Draw
+        nla_rows = global_df[global_df['Draw'].notna()]
+        if not nla_rows.empty:
+            last_nla_row = nla_rows.loc[nla_rows['Draw'].idxmax()]
+            last_nla = f"Draw {int(last_nla_row['Draw'])}: {int(last_nla_row['Num1'])} {int(last_nla_row['Num2'])} {int(last_nla_row['Num3'])} {int(last_nla_row['Num4'])} {int(last_nla_row['Num5'])} BB: {int(last_nla_row['BB'])} Letter: {last_nla_row['Letter']}"
+            total_nla = len(nla_rows)
+
+        # Last SUP6: row with max Draw#
+        sup6_rows = global_df[global_df['Draw#'].notna()]
+        if not sup6_rows.empty:
+            last_sup6_row = sup6_rows.loc[sup6_rows['Draw#'].idxmax()]
+            last_sup6 = f"Draw# {int(last_sup6_row['Draw#'])}: {last_sup6_row['Sup1']} {last_sup6_row['Sup2']} {last_sup6_row['Sup3']} {last_sup6_row['Sup4']} {last_sup6_row['Sup5']} {last_sup6_row['Sup6']} Letter: {last_sup6_row['SupLetter']}"
+            total_sup6 = len(sup6_rows)
+
+    return render_template('results.html', analysis=analysis, sequence=generated_sequence, message=message, last_nla=last_nla, last_sup6=last_sup6, total_nla=total_nla, total_sup6=total_sup6)
 
 @app.route('/add_sup6', methods=['POST'])
 def add_sup6():
-    global global_df, global_model, global_kmeans
+    global global_df, global_model, global_kmeans, global_unsaved_changes
     if global_df is None:
         return redirect(url_for('index'))
 
@@ -376,49 +470,322 @@ def add_sup6():
 
     if draw and draw.isdigit():
         draw_val = int(draw)
+        # Check for duplicate Draw#
+        if draw_val in global_df['Draw#'].dropna().values:
+            message = f"Draw# {draw_val} is already in the database. Cannot add duplicate draw#."
+            return render_template('results.html', analysis=analyze_patterns(global_df), sequence={'numbers': [], 'bb': 0, 'letter': 'A', 'sup6': None}, message=message)
+
         import re
         # Parse SUP6
         if sup6:
             sup6_parts = sup6.split()
             sup6_nums = []
-            sup6_bb = 1
             sup6_letter = 'A'
             for part in sup6_parts:
                 if part.isdigit():
                     sup6_nums.append(int(part))
                 elif part.isalpha() and len(part) == 1:
                     sup6_letter = part.upper()
-            if len(sup6_nums) >= 6:
-                sup6_nums = sup6_nums[:6]
-                # Extract BB if present in sup6 string
-                bb_match_sup = re.search(r'BB[:\-]\s*(\d+)', sup6)
-                if bb_match_sup:
-                    sup6_bb = int(bb_match_sup.group(1))
-                sup_parsed = sup6_nums + [sup6_bb, sup6_letter]
+            if len(sup6_nums) == 6:
+                sup_parsed = sup6_nums + [sup6_letter]
 
                 # Check if draw exists
                 if draw_val in global_df['Draw'].values:
                     # Update existing row
                     idx = global_df[global_df['Draw'] == draw_val].index[0]
-                    global_df.loc[idx, ['Sup1', 'Sup2', 'Sup3', 'Sup4', 'Sup5', 'Sup6', 'SupBB', 'SupLetter']] = sup_parsed
+                    global_df.loc[idx, ['Sup1', 'Sup2', 'Sup3', 'Sup4', 'Sup5', 'Sup6', 'SupLetter']] = sup_parsed
                     message = f"SUP6 added to existing draw {draw_val}."
                 else:
                     # Create new row with NLA as zeros
                     nla_parsed = [0] * 7  # Draw, Draw#, Num1-5, BB, Letter
-                    new_row = pd.DataFrame([[draw_val, None] + [0]*5 + [0, 'A'] + sup_parsed], columns=['Draw', 'Draw#', 'Num1', 'Num2', 'Num3', 'Num4', 'Num5', 'BB', 'Letter', 'Sup1', 'Sup2', 'Sup3', 'Sup4', 'Sup5', 'Sup6', 'SupBB', 'SupLetter'])
+                    new_row = pd.DataFrame([[None, draw_val] + [0]*5 + [0, 'A'] + sup_parsed], columns=['Draw', 'Draw#', 'Num1', 'Num2', 'Num3', 'Num4', 'Num5', 'BB', 'Letter', 'Sup1', 'Sup2', 'Sup3', 'Sup4', 'Sup5', 'Sup6', 'SupLetter'])
                     global_df = pd.concat([global_df, new_row], ignore_index=True)
                     message = f"New SUP6 draw {draw_val} added successfully."
+                global_unsaved_changes = True
+
+                # Retrain model with updated df and regenerate sequence
+                analysis = analyze_patterns(global_df)
+                generated_sequence, model, kmeans = generate_sequence(global_df)
+                global_model = model
+                global_kmeans = kmeans
+                global_current_sequence = generated_sequence
+
+                # Calculate last NLA and SUP6, and totals
+                last_nla = None
+                last_sup6 = None
+                total_nla = 0
+                total_sup6 = 0
+
+                if not global_df.empty:
+                    # Last NLA: row with max Draw
+                    nla_rows = global_df[global_df['Draw'].notna()]
+                    if not nla_rows.empty:
+                        last_nla_row = nla_rows.loc[nla_rows['Draw'].idxmax()]
+                        last_nla = f"Draw {int(last_nla_row['Draw'])}: {int(last_nla_row['Num1'])} {int(last_nla_row['Num2'])} {int(last_nla_row['Num3'])} {int(last_nla_row['Num4'])} {int(last_nla_row['Num5'])} BB: {int(last_nla_row['BB'])} Letter: {last_nla_row['Letter']}"
+                        total_nla = len(nla_rows)
+
+                    # Last SUP6: row with max Draw#
+                    sup6_rows = global_df[global_df['Draw#'].notna()]
+                    if not sup6_rows.empty:
+                        last_sup6_row = sup6_rows.loc[sup6_rows['Draw#'].idxmax()]
+                        last_sup6 = f"Draw# {int(last_sup6_row['Draw#'])}: {last_sup6_row['Sup1']} {last_sup6_row['Sup2']} {last_sup6_row['Sup3']} {last_sup6_row['Sup4']} {last_sup6_row['Sup5']} {last_sup6_row['Sup6']} Letter: {last_sup6_row['SupLetter']}"
+                        total_sup6 = len(sup6_rows)
+
+                return render_template('results.html', analysis=analysis, sequence=generated_sequence, message=message, last_nla=last_nla, last_sup6=last_sup6, total_nla=total_nla, total_sup6=total_sup6)
             else:
                 message = "SUP6 must contain at least 6 numbers."
-                return render_template('results.html', analysis=analyze_patterns(global_df), sequence={'numbers': [], 'bb': 0, 'letter': 'A', 'sup6': {}}, message=message)
+                return render_template('results.html', analysis=analyze_patterns(global_df), sequence={'numbers': [], 'bb': 0, 'letter': 'A', 'sup6': None}, message=message, last_nla=None, last_sup6=None, total_nla=0, total_sup6=0)
 
-    # Retrain model with updated df
-    analysis = analyze_patterns(global_df)
-    generated_sequence, model, kmeans = generate_sequence(global_df)
-    global_model = model
-    global_kmeans = kmeans
+    return render_template('results.html', analysis=analyze_patterns(global_df), sequence=global_current_sequence, message=message, last_nla=None, last_sup6=None, total_nla=0, total_sup6=0)
 
-    return render_template('results.html', analysis=analysis, sequence=generated_sequence, message=message)
+@app.route('/remove_nla', methods=['POST'])
+def remove_nla():
+    global global_df, global_model, global_kmeans, global_unsaved_changes
+    if global_df is None:
+        return redirect(url_for('index'))
+
+    draw = request.form.get('draw')
+    message = None
+
+    if draw and draw.isdigit():
+        draw_val = int(draw)
+        if draw_val in global_df['Draw'].dropna().values:
+            global_df = global_df[global_df['Draw'] != draw_val]
+            message = f"NLA draw {draw_val} removed successfully."
+            global_unsaved_changes = True
+            save_data_to_csv()
+
+            # Retrain model with updated df
+            analysis = analyze_patterns(global_df)
+            generated_sequence, model, kmeans = generate_sequence(global_df)
+            global_model = model
+            global_kmeans = kmeans
+            global_current_sequence = generated_sequence
+
+            return render_template('results.html', analysis=analysis, sequence=generated_sequence, message=message, last_nla=None, last_sup6=None, total_nla=0, total_sup6=0)  # Recalculate in results
+        else:
+            message = f"NLA draw {draw_val} not found."
+    else:
+        message = "Please enter a valid draw number."
+
+    return render_template('results.html', analysis=analyze_patterns(global_df), sequence=global_current_sequence, message=message, last_nla=None, last_sup6=None, total_nla=0, total_sup6=0)
+
+@app.route('/remove_sup6', methods=['POST'])
+def remove_sup6():
+    global global_df, global_model, global_kmeans, global_unsaved_changes
+    if global_df is None:
+        return redirect(url_for('index'))
+
+    draw = request.form.get('draw_num')
+    message = None
+
+    if draw and draw.isdigit():
+        draw_val = int(draw)
+        if draw_val in global_df['Draw#'].dropna().values:
+            global_df = global_df[global_df['Draw#'] != draw_val]
+            message = f"SUP6 draw {draw_val} removed successfully."
+            global_unsaved_changes = True
+            save_data_to_csv()
+
+            # Retrain model with updated df
+            analysis = analyze_patterns(global_df)
+            generated_sequence, model, kmeans = generate_sequence(global_df)
+            global_model = model
+            global_kmeans = kmeans
+            global_current_sequence = generated_sequence
+
+            return render_template('results.html', analysis=analysis, sequence=generated_sequence, message=message, last_nla=None, last_sup6=None, total_nla=0, total_sup6=0)
+        else:
+            message = f"SUP6 draw {draw_val} not found."
+    else:
+        message = "Please enter a valid draw number."
+
+    return render_template('results.html', analysis=analyze_patterns(global_df), sequence=global_current_sequence, message=message, last_nla=None, last_sup6=None, total_nla=0, total_sup6=0)
+
+@app.route('/edit_nla', methods=['POST'])
+def edit_nla():
+    global global_df, global_model, global_kmeans, global_unsaved_changes
+    if global_df is None:
+        return redirect(url_for('index'))
+
+    draw = request.form.get('draw')
+    nla = request.form.get('nla')
+    bb = request.form.get('bb')
+    letter = request.form.get('letter')
+
+    message = None
+
+    if draw and draw.isdigit() and nla and bb and letter:
+        draw_val = int(draw)
+        if draw_val in global_df['Draw'].dropna().values:
+            import re
+            numbers = re.findall(r'\d+', nla)
+            if len(numbers) == 5:
+                nums = [int(n) for n in numbers]
+                if all(1 <= n <= 36 for n in nums) and bb.isdigit() and letter.isalpha() and len(letter) == 1:
+                    bb_val = int(bb)
+                    letter_val = letter.upper()
+
+                    idx = global_df[global_df['Draw'] == draw_val].index[0]
+                    global_df.loc[idx, ['Num1', 'Num2', 'Num3', 'Num4', 'Num5', 'BB', 'Letter']] = nums + [bb_val, letter_val]
+                    message = f"NLA draw {draw_val} updated successfully."
+                    global_unsaved_changes = True
+                    save_data_to_csv()
+
+                    # Retrain model with updated df
+                    analysis = analyze_patterns(global_df)
+                    generated_sequence, model, kmeans = generate_sequence(global_df)
+                    global_model = model
+                    global_kmeans = kmeans
+                    global_current_sequence = generated_sequence
+
+                    return render_template('results.html', analysis=analysis, sequence=generated_sequence, message=message, last_nla=None, last_sup6=None, total_nla=0, total_sup6=0)
+                else:
+                    message = "Invalid NLA numbers, BB, or letter."
+            else:
+                message = "NLA must contain exactly 5 numbers."
+        else:
+            message = f"NLA draw {draw_val} not found."
+    else:
+        message = "Please provide all fields."
+
+    return render_template('results.html', analysis=analyze_patterns(global_df), sequence=global_current_sequence, message=message, last_nla=None, last_sup6=None, total_nla=0, total_sup6=0)
+
+@app.route('/edit_sup6', methods=['POST'])
+def edit_sup6():
+    global global_df, global_model, global_kmeans, global_unsaved_changes
+    if global_df is None:
+        return redirect(url_for('index'))
+
+    draw = request.form.get('draw_num')
+    sup6 = request.form.get('sup6')
+
+    message = None
+
+    if draw and draw.isdigit() and sup6:
+        draw_val = int(draw)
+        if draw_val in global_df['Draw#'].dropna().values:
+            import re
+            sup6_parts = sup6.split()
+            sup6_nums = []
+            sup6_letter = 'A'
+            for part in sup6_parts:
+                if part.isdigit():
+                    sup6_nums.append(int(part))
+                elif part.isalpha() and len(part) == 1:
+                    sup6_letter = part.upper()
+            if len(sup6_nums) == 6:
+                idx = global_df[global_df['Draw#'] == draw_val].index[0]
+                global_df.loc[idx, ['Sup1', 'Sup2', 'Sup3', 'Sup4', 'Sup5', 'Sup6', 'SupLetter']] = sup6_nums + [sup6_letter]
+                message = f"SUP6 draw {draw_val} updated successfully."
+                global_unsaved_changes = True
+                save_data_to_csv()
+
+                # Retrain model with updated df
+                analysis = analyze_patterns(global_df)
+                generated_sequence, model, kmeans = generate_sequence(global_df)
+                global_model = model
+                global_kmeans = kmeans
+                global_current_sequence = generated_sequence
+
+                return render_template('results.html', analysis=analysis, sequence=generated_sequence, message=message, last_nla=None, last_sup6=None, total_nla=0, total_sup6=0)
+            else:
+                message = "SUP6 must contain exactly 6 numbers."
+        else:
+            message = f"SUP6 draw {draw_val} not found."
+    else:
+        message = "Please provide all fields."
+
+    return render_template('results.html', analysis=analyze_patterns(global_df), sequence=global_current_sequence, message=message, last_nla=None, last_sup6=None, total_nla=0, total_sup6=0)
+
+def load_existing_df(filepath):
+    if not os.path.exists(filepath):
+        return pd.DataFrame(columns=['Draw', 'Draw#', 'Num1', 'Num2', 'Num3', 'Num4', 'Num5', 'BB', 'Letter', 'Sup1', 'Sup2', 'Sup3', 'Sup4', 'Sup5', 'Sup6', 'SupLetter'])
+    df = pd.read_csv(filepath)
+    if 'NLA' in df.columns:
+        df['NLA'] = df['NLA'].astype(str)
+        if 'SUP6' in df.columns:
+            df['SUP6'] = df['SUP6'].astype(str)
+        # Parse sample format to parsed format
+        parsed_data = []
+        for _, row in df.iterrows():
+            nla = row['NLA']
+            sup6 = row.get('SUP6', '')
+            draw = row.get('Draw ', None)
+            draw_num = row.get('Draw#', None)
+            # Parse NLA
+            import re
+            numbers = re.findall(r'\d+', nla)
+            if len(numbers) >= 5:
+                nums = [int(n) for n in numbers[:5]]
+                bb_match = re.search(r'BB[:\-]\s*(\d+)', nla)
+                letter_match = re.search(r'Letter:\s*([A-Z])', nla)
+                bb = int(bb_match.group(1)) if bb_match else 1
+                letter = letter_match.group(1) if letter_match else 'A'
+            else:
+                nums = [0]*5
+                bb = 1
+                letter = 'A'
+            # Parse SUP6
+            sup_parsed = ['00'] * 6 + ['A']
+            if sup6 and isinstance(sup6, str):
+                numbers_sup = re.findall(r'\d+', sup6)
+                if len(numbers_sup) >= 6:
+                    sup_parsed = [n.zfill(2) for n in numbers_sup[:6]]
+                    letter_match_sup = re.search(r'Letter:\s*([A-Z])', sup6)
+                    if letter_match_sup:
+                        sup_parsed.append(letter_match_sup.group(1))
+                    else:
+                        # Check for letter at end
+                        parts = sup6.split()
+                        for part in reversed(parts):
+                            if part.isalpha() and len(part) == 1:
+                                sup_parsed.append(part.upper())
+                                break
+                        else:
+                            sup_parsed.append('A')
+                else:
+                    sup_parsed = ['00'] * 6 + ['A']
+            parsed_data.append([draw, draw_num] + nums + [bb, letter] + sup_parsed)
+        return pd.DataFrame(parsed_data, columns=['Draw', 'Draw#', 'Num1', 'Num2', 'Num3', 'Num4', 'Num5', 'BB', 'Letter', 'Sup1', 'Sup2', 'Sup3', 'Sup4', 'Sup5', 'Sup6', 'SupLetter'])
+    else:
+        # Already in parsed format
+        return df
+
+def convert_df_to_sample_format(df):
+    new_rows = []
+    for _, row in df.iterrows():
+        # Construct NLA
+        nla = f"{int(row['Num1'])} {int(row['Num2'])} {int(row['Num3'])} {int(row['Num4'])} {int(row['Num5'])} BB: {int(row['BB'])} Letter: {row['Letter']}"
+        # Construct SUP6 without BB, format numbers with leading zeros
+        sup6 = f"{row['Sup1']} {row['Sup2']} {row['Sup3']} {row['Sup4']} {row['Sup5']} {row['Sup6']} Letter: {row['SupLetter']}"
+        # Draw and Draw#
+        draw = row['Draw']
+        draw_num = row['Draw#']
+        new_rows.append({
+            'NLA': nla,
+            'SUP6': sup6,
+            'Draw ': draw,
+            'Draw#': draw_num
+        })
+    return pd.DataFrame(new_rows)
+
+def save_data_to_csv():
+    global global_df, global_unsaved_changes
+    print(f"save_data_to_csv called: global_df is None: {global_df is None}")
+    if global_df is not None:
+        try:
+            df_to_save = convert_df_to_sample_format(global_df)
+            print(f"Saving {len(df_to_save)} rows to {SAVE_PATH}")
+            df_to_save.to_csv(SAVE_PATH, index=False)
+            global_unsaved_changes = False
+            print("Data saved successfully.")
+            return True, "Data saved successfully."
+        except Exception as e:
+            print(f"Error saving to {SAVE_PATH}: {e}")
+            return False, f"Error saving data: {str(e)}"
+    print("No data to save.")
+    return False, "No data to save."
 
 def save_prediction_to_history(sequence):
     import datetime
@@ -428,7 +795,7 @@ def save_prediction_to_history(sequence):
     sup6_str = ''
     if sequence.get('sup6'):
         sup6 = sequence['sup6']
-        sup6_str = '-'.join(map(str, sup6['numbers'])) + f' BB: {sup6["bb"]} Letter: {sup6["letter"]}'
+        sup6_str = '-'.join(map(str, sup6['numbers'])) + f' Letter: {sup6["letter"]}'
     
     new_row = pd.DataFrame({
         'timestamp': [timestamp],
@@ -444,6 +811,96 @@ def save_prediction_to_history(sequence):
     
     df_hist.to_csv(history_file, index=False)
 
+@app.route('/results')
+def results():
+    global global_df, global_model, global_kmeans, global_current_sequence, global_csv_path
+    # Load saved data if not loaded
+    if global_df is None:
+        global_df = load_saved_data()
+        if global_df is not None:
+            # Set global_csv_path to SAVE_PATH
+            global_csv_path = SAVE_PATH
+            # Generate sequence if loaded
+            analysis = analyze_patterns(global_df)
+            generated_sequence, model, kmeans = generate_sequence(global_df)
+            global_model = model
+            global_kmeans = kmeans
+            global_current_sequence = generated_sequence
+    if global_df is None or global_df.empty:
+        return redirect(url_for('index'))
+    analysis = analyze_patterns(global_df)
+
+    # Calculate last NLA and SUP6, and totals
+    last_nla = None
+    last_sup6 = None
+    total_nla = 0
+    total_sup6 = 0
+
+    if not global_df.empty:
+        # Last NLA: row with max Draw
+        nla_rows = global_df[global_df['Draw'].notna()]
+        if not nla_rows.empty:
+            last_nla_row = nla_rows.loc[nla_rows['Draw'].idxmax()]
+            last_nla = f"Draw {int(last_nla_row['Draw'])}: {int(last_nla_row['Num1'])} {int(last_nla_row['Num2'])} {int(last_nla_row['Num3'])} {int(last_nla_row['Num4'])} {int(last_nla_row['Num5'])} BB: {int(last_nla_row['BB'])} Letter: {last_nla_row['Letter']}"
+            total_nla = len(nla_rows)
+
+        # Last SUP6: row with max Draw#
+        sup6_rows = global_df[global_df['Draw#'].notna()]
+        if not sup6_rows.empty:
+            last_sup6_row = sup6_rows.loc[sup6_rows['Draw#'].idxmax()]
+            last_sup6 = f"Draw# {int(last_sup6_row['Draw#'])}: {last_sup6_row['Sup1']} {last_sup6_row['Sup2']} {last_sup6_row['Sup3']} {last_sup6_row['Sup4']} {last_sup6_row['Sup5']} {last_sup6_row['Sup6']} Letter: {last_sup6_row['SupLetter']}"
+            total_sup6 = len(sup6_rows)
+
+    return render_template('results.html', analysis=analysis, sequence=global_current_sequence, last_nla=last_nla, last_sup6=last_sup6, total_nla=total_nla, total_sup6=total_sup6)
+
+@app.route('/search', methods=['GET', 'POST'])
+def search():
+    global global_df, global_model, global_kmeans, global_current_sequence
+    results = None
+    message = None
+    draw = None
+    if request.method == 'POST':
+        draw = request.form.get('draw')
+        if draw and draw.isdigit():
+            draw_val = int(draw)
+            # Load saved data if not loaded
+            if global_df is None:
+                global_df = load_saved_data()
+                if global_df is not None:
+                    # Generate sequence if loaded
+                    analysis = analyze_patterns(global_df)
+                    generated_sequence, model, kmeans = generate_sequence(global_df)
+                    global_model = model
+                    global_kmeans = kmeans
+                    global_current_sequence = generated_sequence
+            if global_df is not None and not global_df.empty:
+                # Search for NLA by Draw
+                nla_row = global_df[global_df['Draw'] == draw_val]
+                if not nla_row.empty:
+                    row = nla_row.iloc[0]
+                    nla = f"{int(row['Num1'])} {int(row['Num2'])} {int(row['Num3'])} {int(row['Num4'])} {int(row['Num5'])} BB: {int(row['BB'])} Letter: {row['Letter']}"
+                else:
+                    nla = None
+
+                # Search for SUP6 by Draw#
+                sup6_row = global_df[global_df['Draw#'] == draw_val]
+                if not sup6_row.empty:
+                    row = sup6_row.iloc[0]
+                    sup6 = f"{row['Sup1']} {row['Sup2']} {row['Sup3']} {row['Sup4']} {row['Sup5']} {row['Sup6']} Letter: {row['SupLetter']}"
+                else:
+                    sup6 = None
+
+                if nla or sup6:
+                    results = {'nla': nla, 'sup6': sup6}
+                else:
+                    message = f"No data found for Draw {draw_val}."
+            else:
+                message = "No data uploaded yet. Please upload a CSV first."
+        else:
+            message = "Please enter a valid draw number."
+    global_df_exists = global_df is not None and not global_df.empty
+    return render_template('search.html', results=results, message=message, draw=draw, global_df_exists=global_df_exists)
+
 @app.route('/history')
 def history():
     history_file = 'prediction_history.csv'
@@ -454,5 +911,29 @@ def history():
         history_list = []
     return render_template('history.html', history=history_list)
 
+@app.route('/save', methods=['POST'])
+def save():
+    global global_df, global_unsaved_changes, global_csv_path
+    if global_df is not None:
+        try:
+            save_path = global_csv_path if global_csv_path else r'C:\Users\jomal\OneDrive\Documents\reconstructed_lotto.csv'
+            convert_df_to_sample_format(global_df).to_csv(save_path, index=False)
+            global_unsaved_changes = False
+            return {'status': 'success', 'message': 'Data saved successfully.'}
+        except Exception as e:
+            return {'status': 'error', 'message': f'Error saving data: {str(e)}'}
+    return {'status': 'error', 'message': 'No data to save.'}
+
+@app.route('/download')
+def download():
+    global global_csv_path
+    if global_csv_path and os.path.exists(global_csv_path):
+        return send_file(global_csv_path, as_attachment=True, download_name='updated_lotto_data.csv')
+    return "No file available for download."
+
+@app.route('/exit')
+def exit_app():
+    return render_template('exit.html')
+
 if __name__ == '__main__':
-    app.run(debug=True, port=3000)
+    app.run(debug=True, port=5000)
