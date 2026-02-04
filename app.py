@@ -266,9 +266,32 @@ def analyze_patterns(df):
 
     return results
 
+def load_historical_predictions():
+    """Load and parse historical predictions to incorporate into algorithm."""
+    history_file = 'prediction_history.csv'
+    if not os.path.exists(history_file):
+        return []
+
+    df_hist = pd.read_csv(history_file)
+    predictions = []
+    for _, row in df_hist.iterrows():
+        nla_pred = row['nla_prediction']
+        # Parse NLA prediction: e.g., "5-10-20-28-32 BB: 11 Letter: A"
+        import re
+        nla_match = re.match(r'(\d+)-(\d+)-(\d+)-(\d+)-(\d+) BB: (\d+) Letter: ([A-Z])', nla_pred)
+        if nla_match:
+            nums = [int(nla_match.group(i)) for i in range(1, 6)]
+            bb = int(nla_match.group(6))
+            letter = nla_match.group(7)
+            predictions.append({'numbers': nums, 'bb': bb, 'letter': letter})
+    return predictions
+
 def generate_sequence(df):
     # Drop rows with any NaN to avoid sklearn errors
     df = df.dropna()
+
+    # Load historical predictions
+    hist_predictions = load_historical_predictions()
 
     # If not enough data, return a random sequence
     if len(df) < 2:
@@ -380,6 +403,15 @@ def generate_sequence(df):
     kmeans = KMeans(n_clusters=5, random_state=42)
     clusters = kmeans.fit_predict(df[['Num1', 'Num2', 'Num3', 'Num4', 'Num5', 'BB']].values)
 
+    # Incorporate historical predictions for improved accuracy
+    hist_freq = {}
+    if hist_predictions:
+        for pred in hist_predictions:
+            for num in pred['numbers']:
+                hist_freq[num] = hist_freq.get(num, 0) + 1
+        # Sort by frequency
+        hist_sorted = sorted(hist_freq.items(), key=lambda x: x[1], reverse=True)
+
     # Generate new sequence: Start with a random seed, predict step-by-step, bias toward high-freq numbers, ensure no duplicates
     new_seq = []
     used = set()
@@ -399,23 +431,29 @@ def generate_sequence(df):
         # Handle NaN prediction
         if np.isnan(pred):
             pred = top_num  # Use top_num if prediction is NaN
-        # Blend prediction with frequency (e.g., 70% pred, 30% top freq)
-        blended = int(0.7 * pred + 0.3 * top_num)
+        # Blend prediction with frequency and historical predictions (e.g., 50% pred, 30% freq, 20% hist)
+        hist_weight = 0.2 if hist_freq else 0
+        freq_weight = 0.3
+        pred_weight = 0.5
+        hist_num = hist_sorted[0][0] if hist_sorted else top_num
+        blended = int(pred_weight * pred + freq_weight * top_num + hist_weight * hist_num)
         blended = max(1, min(36, blended))  # Clamp to 1-36
         if blended not in used:
             new_seq.append(blended)
             used.add(blended)
             prev = (new_seq + [0] * 9)[:9]  # Update prev with current sequence padded to 9
         else:
-            # Try next most frequent not used
+            # Try next most frequent not used, prioritizing historical
+            candidates = []
+            if hist_sorted:
+                candidates.extend([num for num, _ in hist_sorted if num not in used])
             freq_sorted = freq.sort_values(ascending=False)
-            for num in freq_sorted.index:
-                if num not in used:
-                    blended = int(num)
-                    new_seq.append(blended)
-                    used.add(blended)
-                    prev = (new_seq + [0] * 9)[:9]
-                    break
+            candidates.extend([num for num in freq_sorted.index if num not in used and num not in candidates])
+            if candidates:
+                blended = int(candidates[0])
+                new_seq.append(blended)
+                used.add(blended)
+                prev = (new_seq + [0] * 9)[:9]
             else:
                 # If all frequent used, pick random available
                 available = [n for n in range(1, 37) if n not in used]
@@ -1022,6 +1060,8 @@ def history():
     history_file = 'prediction_history.csv'
     if os.path.exists(history_file):
         df_hist = pd.read_csv(history_file)
+        # Remove duplicates based on nla_prediction to improve user viewing
+        df_hist = df_hist.drop_duplicates(subset=['nla_prediction'], keep='first')
         history_list = df_hist.to_dict('records')
     else:
         history_list = []
