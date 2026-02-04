@@ -7,12 +7,17 @@ from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier, Grad
 from sklearn.model_selection import train_test_split
 import os
 import random
-# from tensorflow.keras.models import Sequential
-# from tensorflow.keras.layers import LSTM, Dropout, Dense
-# from tensorflow.keras.optimizers import Adam
+import math
+import itertools
+from collections import Counter
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dropout, Dense
+from tensorflow.keras.optimizers import Adam
 
 app = Flask(__name__)
-app.config['UPLOAD_FOLDER'] = os.path.join(os.path.dirname(__file__), 'uploads')
+# For Vercel deployment, use temporary directory
+import tempfile
+app.config['UPLOAD_FOLDER'] = tempfile.gettempdir()
 
 # Global variables to store data and model
 global_df = None
@@ -151,30 +156,113 @@ def index():
             return render_template('results.html', analysis=analysis, sequence=generated_sequence, csv_filename=global_csv_filename, last_nla=last_nla, last_sup6=last_sup6, total_nla=total_nla, total_sup6=total_sup6)
     return render_template('index.html')
 
+def calculate_probability(n=5, k=36):
+    """Calculate total combinations and odds for lotto game."""
+    total_combinations = math.comb(k, n)
+    odds = total_combinations
+    return {'total_combinations': total_combinations, 'odds': odds}
+
+def monte_carlo_simulation(df, num_simulations=1000):
+    """Run Monte Carlo simulations based on historical frequencies."""
+    all_nums = []
+    for _, row in df.iterrows():
+        all_nums.extend([row['Num1'], row['Num2'], row['Num3'], row['Num4'], row['Num5']])
+    freq = Counter(all_nums)
+    total_draws = len(df)
+    probabilities = {num: count / (total_draws * 5) for num, count in freq.items()}
+
+    # Simulate draws
+    simulated_numbers = []
+    for _ in range(num_simulations):
+        draw = random.choices(list(probabilities.keys()), weights=list(probabilities.values()), k=5)
+        simulated_numbers.extend(draw)
+
+    # Return average of simulated numbers
+    sim_freq = Counter(simulated_numbers)
+    avg_nums = [num for num, _ in sim_freq.most_common(5)]
+    return avg_nums
+
+def avoid_popular_patterns(sequence):
+    """Avoid common patterns like dates or arithmetic sequences."""
+    numbers = sequence['numbers']
+    # Check for date patterns (1-31)
+    if all(1 <= n <= 31 for n in numbers):
+        # Replace with less common numbers
+        cold_nums = [32, 33, 34, 35, 36]
+        sequence['numbers'] = cold_nums[:5]
+
+    # Check for arithmetic sequences (e.g., 1,2,3,4,5)
+    diffs = [numbers[i+1] - numbers[i] for i in range(len(numbers)-1)]
+    if len(set(diffs)) == 1:  # All differences equal
+        # Replace with random non-arithmetic
+        sequence['numbers'] = random.sample(range(1, 37), 5)
+
+    return sequence
+
+def wheel_system(numbers, k=5):
+    """Generate multiple combinations using wheel system."""
+    if len(numbers) < k:
+        return [numbers]
+    # Simple wheel: all combinations of k from numbers
+    return list(itertools.combinations(numbers, k))
+
 def analyze_patterns(df):
     results = {}
+
+    # Fundamental Probability
+    prob = calculate_probability()
+    results['Total Combinations'] = prob['total_combinations']
+    results['Odds of Winning'] = f"1 in {prob['odds']}"
 
     # Positional frequencies
     for pos in range(5):
         results[f'Position {pos+1} Frequencies'] = df.iloc[:, pos].value_counts().to_dict()
+
+    # Hot and Cold numbers
+    all_nums = []
+    for _, row in df.iterrows():
+        all_nums.extend([row['Num1'], row['Num2'], row['Num3'], row['Num4'], row['Num5']])
+    freq = Counter(all_nums)
+    sorted_freq = sorted(freq.items(), key=lambda x: x[1], reverse=True)
+    results['Hot Numbers'] = [num for num, count in sorted_freq[:10]]
+    results['Cold Numbers'] = [num for num, count in sorted_freq[-10:]]
 
     # Numbers never called
     all_numbers = set(range(1, 37))
     used_numbers = set(df.values.flatten())
     results['Never Called'] = list(all_numbers - used_numbers)
 
-    # Numbers always called (in all 114 sequences)
+    # Numbers always called (in all sequences)
     always_called = set(range(1, 37))
     for _, row in df.iterrows():
-        always_called &= set(row)
+        always_called &= set([row['Num1'], row['Num2'], row['Num3'], row['Num4'], row['Num5']])
     results['Always Called'] = list(always_called) if always_called else "None"
 
-    # Positional repeats (how often a number repeats in the same position across sequences)
+    # Positional repeats
     repeats = {}
     for pos in range(5):
         pos_data = df.iloc[:, pos]
-        repeats[f'Position {pos+1}'] = pos_data.value_counts().max()  # Max count for any number
+        repeats[f'Position {pos+1}'] = pos_data.value_counts().max()
     results['Max Repeats per Position'] = repeats
+
+    # Delta System: Differences between consecutive numbers
+    deltas = []
+    for _, row in df.iterrows():
+        nums = sorted([row['Num1'], row['Num2'], row['Num3'], row['Num4'], row['Num5']])
+        row_deltas = [nums[i+1] - nums[i] for i in range(len(nums)-1)]
+        deltas.extend(row_deltas)
+    delta_freq = Counter(deltas)
+    results['Common Deltas'] = dict(delta_freq.most_common(5))
+
+    # Co-occurrence Analysis: Pairs of numbers that appear together
+    pairs = []
+    for _, row in df.iterrows():
+        nums = [row['Num1'], row['Num2'], row['Num3'], row['Num4'], row['Num5']]
+        for i in range(len(nums)):
+            for j in range(i+1, len(nums)):
+                pairs.append(tuple(sorted([nums[i], nums[j]])))
+    pair_freq = Counter(pairs)
+    results['Common Pairs'] = dict(pair_freq.most_common(10))
 
     return results
 
@@ -263,8 +351,30 @@ def generate_sequence(df):
         model_sup_letter = RandomForestClassifier(n_estimators=100, random_state=42)
         model_sup_letter.fit(X_sup_letter, y_sup_letter)
 
-    # LSTM for sequence prediction (disabled for now to avoid crashes)
+    # LSTM for sequence prediction
     lstm_model = None
+    if len(sequences) > 10:  # Need enough data for LSTM
+        try:
+            # Prepare sequences for LSTM: sequences of numbers over time
+            seq_length = 5  # Look at last 5 draws
+            X_lstm = []
+            y_lstm = []
+            for i in range(len(sequences) - seq_length):
+                X_lstm.append(sequences[i:i+seq_length])
+                y_lstm.append(sequences[i+seq_length])
+            X_lstm = np.array(X_lstm)
+            y_lstm = np.array(y_lstm)
+
+            # Build LSTM model
+            lstm_model = Sequential()
+            lstm_model.add(LSTM(50, activation='relu', input_shape=(seq_length, 5)))
+            lstm_model.add(Dropout(0.2))
+            lstm_model.add(Dense(5))  # Predict 5 numbers
+            lstm_model.compile(optimizer=Adam(learning_rate=0.001), loss='mse')
+            lstm_model.fit(X_lstm, y_lstm, epochs=50, batch_size=32, verbose=0)
+        except Exception as e:
+            print(f"LSTM training failed: {e}")
+            lstm_model = None
 
     # Unsupervised: Cluster sequences to find patterns
     kmeans = KMeans(n_clusters=5, random_state=42)
@@ -277,9 +387,9 @@ def generate_sequence(df):
     for pos in range(5):
         pred = model.predict(np.array([prev]))[0]
         # Use LSTM if available for better prediction
-        if lstm_model is not None:
-            lstm_pred = lstm_model.predict(np.array([prev]).reshape(1, 5, 1))[0]
-            pred = 0.5 * pred + 0.5 * np.mean(lstm_pred)  # Blend RF and LSTM predictions
+        # if lstm_model is not None:
+        #     lstm_pred = lstm_model.predict(np.array([prev]).reshape(1, 5, 1))[0]
+        #     pred = 0.5 * pred + 0.5 * np.mean(lstm_pred)  # Blend RF and LSTM predictions
         # Bias: Adjust toward most frequent in that position
         freq = df.iloc[:, pos + 2].value_counts()  # Num1 is column 2
         if freq.empty:
@@ -385,7 +495,13 @@ def generate_sequence(df):
         pred_sup_letter = model_sup_letter.predict(np.array([new_seq]))[0]
         sup6 = {'numbers': new_sup_seq, 'letter': pred_sup_letter}
 
-    return {'numbers': new_seq, 'bb': pred_bb, 'letter': pred_letter, 'sup6': sup6}, model, kmeans
+    # Apply Monte Carlo and avoid patterns
+    monte_carlo_seq = monte_carlo_simulation(df)
+    # Blend with generated sequence
+    final_seq = {'numbers': [(a + b) // 2 for a, b in zip(new_seq, monte_carlo_seq)], 'bb': pred_bb, 'letter': pred_letter, 'sup6': sup6}
+    final_seq = avoid_popular_patterns(final_seq)
+
+    return final_seq, model, kmeans
 
 @app.route('/add_nla', methods=['POST'])
 def add_nla():
@@ -936,4 +1052,4 @@ def exit_app():
     return render_template('exit.html')
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    app.run(debug=True, port=3000)
