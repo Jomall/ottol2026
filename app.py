@@ -10,9 +10,16 @@ import random
 import math
 import itertools
 from collections import Counter
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dropout, Dense
-from tensorflow.keras.optimizers import Adam
+from scipy.stats import entropy
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.metrics import mutual_info_score
+try:
+    from tensorflow.keras.models import Sequential
+    from tensorflow.keras.layers import LSTM, Dropout, Dense
+    from tensorflow.keras.optimizers import Adam
+    TENSORFLOW_AVAILABLE = True
+except ImportError:
+    TENSORFLOW_AVAILABLE = False
 
 app = Flask(__name__)
 # For Vercel deployment, use temporary directory
@@ -376,7 +383,7 @@ def generate_sequence(df):
 
     # LSTM for sequence prediction
     lstm_model = None
-    if len(sequences) > 10:  # Need enough data for LSTM
+    if TENSORFLOW_AVAILABLE and len(sequences) > 10:  # Need enough data for LSTM
         try:
             # Prepare sequences for LSTM: sequences of numbers over time
             seq_length = 5  # Look at last 5 draws
