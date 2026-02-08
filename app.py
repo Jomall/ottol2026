@@ -14,9 +14,9 @@ from scipy.stats import entropy
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.metrics import mutual_info_score
 try:
-    from tensorflow.keras.models import Sequential
-    from tensorflow.keras.layers import LSTM, Dropout, Dense
-    from tensorflow.keras.optimizers import Adam
+    from tensorflow.keras.models import Sequential  # type: ignore
+    from tensorflow.keras.layers import LSTM, Dropout, Dense  # type: ignore
+    from tensorflow.keras.optimizers import Adam  # type: ignore
     TENSORFLOW_AVAILABLE = True
 except ImportError:
     TENSORFLOW_AVAILABLE = False
@@ -26,27 +26,31 @@ app = Flask(__name__)
 import tempfile
 app.config['UPLOAD_FOLDER'] = tempfile.gettempdir()
 
+# Persistent save path
+SAVE_PATH = os.path.join(os.path.dirname(__file__), 'reconstructed_lotto.csv')
+
 # Global variables to store data and model
 global_df = None
-global_model = None
+global_model_nla = None
+global_model_bb = None
+global_model_letter = None
+global_model_sup = None
+global_model_sup_letter = None
 global_kmeans = None
 global_csv_path = None
 global_csv_filename = None
 global_current_sequence = None
 global_unsaved_changes = False
 
-# Persistent save path
-SAVE_PATH = r'C:\Users\jomal\OneDrive\Documents\reconstructed_lotto.csv'
-
 def load_saved_data():
-    save_path = r'C:\Users\jomal\OneDrive\Documents\reconstructed_lotto.csv'
+    save_path = SAVE_PATH
     if os.path.exists(save_path):
         return load_existing_df(save_path)
     return None
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
-    global global_df, global_model, global_kmeans, global_csv_path, global_csv_filename
+    global global_df, global_model, global_kmeans, global_csv_path, global_csv_filename, global_current_sequence
     if request.method == 'POST':
         file = request.files['file']
         if file and file.filename.endswith('.csv'):
@@ -125,9 +129,12 @@ def index():
             analysis = analyze_patterns(global_df)
 
             # ML and Generation
-            generated_sequence, model, kmeans = generate_sequence(global_df)
-            global_model = model
-            global_kmeans = kmeans
+            generated_sequence, model_nla, model_bb, model_letter, model_sup, model_sup_letter = generate_sequence(global_df)
+            global_model_nla = model_nla
+            global_model_bb = model_bb
+            global_model_letter = model_letter
+            global_model_sup = model_sup
+            global_model_sup_letter = model_sup_letter
             global_current_sequence = generated_sequence
 
             # Save updated data to SAVE_PATH
@@ -293,9 +300,11 @@ def load_historical_predictions():
             predictions.append({'numbers': nums, 'bb': bb, 'letter': letter})
     return predictions
 
-def generate_sequence(df):
+def generate_nla_sequence(df):
     # Drop rows with any NaN to avoid sklearn errors
     df = df.dropna()
+    # Filter to NLA rows only
+    df = df.dropna(subset=['Draw'])
 
     # Load historical predictions
     hist_predictions = load_historical_predictions()
@@ -305,7 +314,7 @@ def generate_sequence(df):
         new_seq = random.sample(range(1, 37), 5)
         pred_bb = random.randint(1, 36)
         pred_letter = random.choice(['A', 'B', 'C', 'D', 'E'])
-        return {'numbers': new_seq, 'bb': pred_bb, 'letter': pred_letter, 'sup6': None}, None, None
+        return {'numbers': new_seq, 'bb': pred_bb, 'letter': pred_letter}, None, None, None
 
     # Convert numeric columns to regular int/float to avoid nullable types
     numeric_cols = ['Num1', 'Num2', 'Num3', 'Num4', 'Num5', 'BB']
@@ -317,17 +326,12 @@ def generate_sequence(df):
     if 'Draw#' in df.columns:
         df['Draw#'] = df['Draw#'].astype(int)
 
-    # Prepare data for ML
-    # For supervised: Predict each position based on previous (simple chain)
+    # Prepare data for ML for NLA
     X = []
     y = []
     X_bb_letter = []
     y_bb = []
     y_letter = []
-    X_sup = []
-    y_sup = []
-    X_sup_letter = []
-    y_sup_letter = []
     sequences = []
     for i in range(len(df) - 1):
         seq = df.iloc[i, 2:7].values.tolist()
@@ -341,26 +345,11 @@ def generate_sequence(df):
         y_bb.append(next_seq['BB'])
         y_letter.append(next_seq['Letter'])
 
-        # For SUP6, if available
-        if not pd.isna(next_seq['Sup1']) and next_seq['Sup1'] != '00':  # Assuming '00' means not parsed
-            sup_values = df.iloc[i][['Sup1', 'Sup2', 'Sup3', 'Sup4', 'Sup5', 'Sup6']].values.tolist()
-            if not any(pd.isna(s) for s in sup_values):
-                sup_seq = [int(s) for s in sup_values]
-                for pos in range(6):
-                    X_sup.append((sup_seq[:pos] + [0] * (6 - pos)) if pos > 0 else [0] * 6)  # Features: previous SUP6 positions, padded to 6
-                    y_sup.append(int(next_seq[f'Sup{pos+1}']))
-            X_sup_letter.append(seq)
-            y_sup_letter.append(next_seq['SupLetter'])
-
     X = np.array(X)
     y = np.array(y)
     X_bb_letter = np.array(X_bb_letter)
     y_bb = np.array(y_bb)
     y_letter = np.array(y_letter)
-    if len(X_sup) > 0:
-        X_sup = np.array(X_sup)
-        y_sup = np.array(y_sup)
-        y_sup_letter = np.array(y_sup_letter)
 
     # Train a simple model (Random Forest for regression on numbers)
     model = RandomForestRegressor(n_estimators=100, random_state=42)
@@ -374,44 +363,9 @@ def generate_sequence(df):
     model_letter = RandomForestClassifier(n_estimators=100, random_state=42)
     model_letter.fit(X_bb_letter, y_letter)
 
-    # Train SUP6 models if data available
-    if len(X_sup) > 0:
-        model_sup = RandomForestRegressor(n_estimators=100, random_state=42)
-        model_sup.fit(X_sup, y_sup)
-        model_sup_letter = RandomForestClassifier(n_estimators=100, random_state=42)
-        model_sup_letter.fit(X_sup_letter, y_sup_letter)
-
-    # LSTM for sequence prediction
-    lstm_model = None
-    if TENSORFLOW_AVAILABLE and len(sequences) > 10:  # Need enough data for LSTM
-        try:
-            # Prepare sequences for LSTM: sequences of numbers over time
-            seq_length = 5  # Look at last 5 draws
-            X_lstm = []
-            y_lstm = []
-            for i in range(len(sequences) - seq_length):
-                X_lstm.append(sequences[i:i+seq_length])
-                y_lstm.append(sequences[i+seq_length])
-            X_lstm = np.array(X_lstm)
-            y_lstm = np.array(y_lstm)
-
-            # Build LSTM model
-            lstm_model = Sequential()
-            lstm_model.add(LSTM(50, activation='relu', input_shape=(seq_length, 5)))
-            lstm_model.add(Dropout(0.2))
-            lstm_model.add(Dense(5))  # Predict 5 numbers
-            lstm_model.compile(optimizer=Adam(learning_rate=0.001), loss='mse')
-            lstm_model.fit(X_lstm, y_lstm, epochs=50, batch_size=32, verbose=0)
-        except Exception as e:
-            print(f"LSTM training failed: {e}")
-            lstm_model = None
-
-    # Unsupervised: Cluster sequences to find patterns
-    kmeans = KMeans(n_clusters=5, random_state=42)
-    clusters = kmeans.fit_predict(df[['Num1', 'Num2', 'Num3', 'Num4', 'Num5', 'BB']].values)
-
     # Incorporate historical predictions for improved accuracy
     hist_freq = {}
+    hist_sorted = []
     if hist_predictions:
         for pred in hist_predictions:
             for num in pred['numbers']:
@@ -425,10 +379,6 @@ def generate_sequence(df):
     prev = [0] * 9  # Start with padded features
     for pos in range(5):
         pred = model.predict(np.array([prev]))[0]
-        # Use LSTM if available for better prediction
-        # if lstm_model is not None:
-        #     lstm_pred = lstm_model.predict(np.array([prev]).reshape(1, 5, 1))[0]
-        #     pred = 0.5 * pred + 0.5 * np.mean(lstm_pred)  # Blend RF and LSTM predictions
         # Bias: Adjust toward most frequent in that position
         freq = df.iloc[:, pos + 2].value_counts()  # Num1 is column 2
         if freq.empty:
@@ -462,10 +412,10 @@ def generate_sequence(df):
                 used.add(blended)
                 prev = (new_seq + [0] * 9)[:9]
             else:
-                # If all frequent used, pick random available
+                # If all frequent used, pick the smallest available
                 available = [n for n in range(1, 37) if n not in used]
                 if available:
-                    blended = random.choice(available)
+                    blended = available[0]
                     new_seq.append(blended)
                     used.add(blended)
                     prev = (new_seq + [0] * 9)[:9]
@@ -481,76 +431,124 @@ def generate_sequence(df):
     pred_bb = int(max(1, min(36, pred_bb)))  # Clamp BB to reasonable range, assuming 1-36
     pred_letter = model_letter.predict(np.array([new_seq]))[0]
 
-    # Generate SUP6 if model available, ensure no duplicates
-    sup6 = None
-    if len(X_sup) > 0:
-        new_sup_seq = []
-        used_sup = set()
-        for pos in range(6):
-            attempts = 0
-            while attempts < 10:  # Limit attempts to prevent infinite loop
-                if pos == 0:
-                    pred_input = [0] * 6
-                else:
-                    pred_input = new_sup_seq[:pos] + [0] * (6 - pos)
-                pred_sup = float(model_sup.predict(np.array([pred_input]))[0])
-                # Bias toward freq
-                freq_sup = df.iloc[:, 9 + pos].value_counts()  # Sup1 to Sup6 are columns 9 to 14
-                if freq_sup.empty:
-                    top_num_sup = 1.0
-                else:
-                    top_val = freq_sup.idxmax()
-                    try:
-                        top_num_sup = float(top_val)
-                    except ValueError:
-                        top_num_sup = 1.0  # Default if not numeric
-                if np.isnan(pred_sup):
-                    pred_sup = top_num_sup
-                blended_sup = int(0.7 * pred_sup + 0.3 * top_num_sup)
-                blended_sup = max(1, min(36, blended_sup))
-                if blended_sup not in used_sup:
-                    new_sup_seq.append(blended_sup)
-                    used_sup.add(blended_sup)
-                    break
-                else:
-                    # Try next most frequent not used
-                    freq_sorted_sup = freq_sup.sort_values(ascending=False)
-                    for num in freq_sorted_sup.index:
-                        if num not in used_sup:
-                            blended_sup = int(num)
-                            new_sup_seq.append(blended_sup)
-                            used_sup.add(blended_sup)
-                            break
-                    else:
-                        # If all frequent used, pick random available
-                        available_sup = [n for n in range(1, 37) if n not in used_sup]
-                        if available_sup:
-                            blended_sup = random.choice(available_sup)
-                            new_sup_seq.append(blended_sup)
-                            used_sup.add(blended_sup)
-                        break
-                attempts += 1
-            if attempts >= 10:
-                # Fallback: random unique if still not found
-                available_sup = [n for n in range(1, 37) if n not in used_sup]
-                if available_sup:
-                    blended_sup = random.choice(available_sup)
-                    new_sup_seq.append(blended_sup)
-                    used_sup.add(blended_sup)
-        pred_sup_letter = model_sup_letter.predict(np.array([new_seq]))[0]
-        sup6 = {'numbers': new_sup_seq, 'letter': pred_sup_letter}
-
     # Apply Monte Carlo and avoid patterns
     monte_carlo_seq = monte_carlo_simulation(df)
     # Blend with generated sequence
-    final_seq = {'numbers': [(a + b) // 2 for a, b in zip(new_seq, monte_carlo_seq)], 'bb': pred_bb, 'letter': pred_letter, 'sup6': sup6}
+    final_seq = {'numbers': [(a + b) // 2 for a, b in zip(new_seq, monte_carlo_seq)], 'bb': pred_bb, 'letter': pred_letter}
     final_seq = avoid_popular_patterns(final_seq)
 
-    return final_seq, model, kmeans
+    return final_seq, model, model_bb, model_letter
+
+def generate_sup6_sequence(df):
+    # Drop rows with any NaN to avoid sklearn errors
+    df = df.dropna()
+
+    # If no SUP6 data, return None
+    sup6_rows = df[df['Sup1'] != '00']
+    if len(sup6_rows) < 2:
+        return None, None, None
+
+    # Prepare data for SUP6 ML
+    X_sup = []
+    y_sup = []
+    X_sup_letter = []
+    y_sup_letter = []
+    for i in range(len(df) - 1):
+        next_seq = df.iloc[i+1]
+        if not pd.isna(next_seq['Sup1']) and next_seq['Sup1'] != '00':
+            sup_values = df.iloc[i][['Sup1', 'Sup2', 'Sup3', 'Sup4', 'Sup5', 'Sup6']].values.tolist()
+            if not any(pd.isna(s) for s in sup_values):
+                sup_seq = [int(s) for s in sup_values]
+                for pos in range(6):
+                    X_sup.append((sup_seq[:pos] + [0] * (6 - pos)) if pos > 0 else [0] * 6)  # Features: previous SUP6 positions, padded to 6
+                    y_sup.append(int(next_seq[f'Sup{pos+1}']))
+            X_sup_letter.append(df.iloc[i, 2:7].values.tolist())  # Use NLA sequence as features for SUP6 letter
+            y_sup_letter.append(next_seq['SupLetter'])
+
+    if len(X_sup) == 0:
+        return None, None, None
+
+    X_sup = np.array(X_sup)
+    y_sup = np.array(y_sup)
+    X_sup_letter = np.array(X_sup_letter)
+    y_sup_letter = np.array(y_sup_letter)
+
+    # Train SUP6 models
+    model_sup = RandomForestRegressor(n_estimators=100, random_state=42)
+    model_sup.fit(X_sup, y_sup)
+    model_sup_letter = RandomForestClassifier(n_estimators=100, random_state=42)
+    model_sup_letter.fit(X_sup_letter, y_sup_letter)
+
+    # Generate SUP6 sequence, ensure no duplicates
+    new_sup_seq = []
+    used_sup = set()
+    for pos in range(6):
+        attempts = 0
+        while attempts < 10:  # Limit attempts to prevent infinite loop
+            if pos == 0:
+                pred_input = [0] * 6
+            else:
+                pred_input = new_sup_seq[:pos] + [0] * (6 - pos)
+            pred_sup = float(model_sup.predict(np.array([pred_input]))[0])
+            # Bias toward freq
+            freq_sup = df.iloc[:, 9 + pos].value_counts()  # Sup1 to Sup6 are columns 9 to 14
+            if freq_sup.empty:
+                top_num_sup = 1.0
+            else:
+                top_val = freq_sup.idxmax()
+                try:
+                    top_num_sup = float(top_val)
+                except ValueError:
+                    top_num_sup = 1.0  # Default if not numeric
+            if np.isnan(pred_sup):
+                pred_sup = top_num_sup
+            blended_sup = int(0.7 * pred_sup + 0.3 * top_num_sup)
+            blended_sup = max(1, min(36, blended_sup))
+            if blended_sup not in used_sup:
+                new_sup_seq.append(blended_sup)
+                used_sup.add(blended_sup)
+                break
+            else:
+                # Try next most frequent not used
+                freq_sorted_sup = freq_sup.sort_values(ascending=False)
+                for num in freq_sorted_sup.index:
+                    if num not in used_sup:
+                        blended_sup = int(num)
+                        new_sup_seq.append(blended_sup)
+                        used_sup.add(blended_sup)
+                        break
+                else:
+                    # If all frequent used, pick random available
+                    available_sup = [n for n in range(1, 37) if n not in used_sup]
+                    if available_sup:
+                        blended_sup = random.choice(available_sup)
+                        new_sup_seq.append(blended_sup)
+                        used_sup.add(blended_sup)
+                    break
+            attempts += 1
+        if attempts >= 10:
+            # Fallback: random unique if still not found
+            available_sup = [n for n in range(1, 37) if n not in used_sup]
+            if available_sup:
+                blended_sup = random.choice(available_sup)
+                new_sup_seq.append(blended_sup)
+                used_sup.add(blended_sup)
+
+    # Predict SUP6 letter
+    pred_sup_letter = model_sup_letter.predict(np.array([[0]*5]))[0]  # Use dummy NLA sequence
+    sup6 = {'numbers': new_sup_seq, 'letter': pred_sup_letter}
+
+    return sup6, model_sup, model_sup_letter
+
+def generate_sequence(df):
+    nla_seq, model_nla, model_bb, model_letter = generate_nla_sequence(df)
+    sup6_seq, model_sup, model_sup_letter = generate_sup6_sequence(df)
+    final_seq = {**nla_seq, 'sup6': sup6_seq}
+    return final_seq, model_nla, model_bb, model_letter, model_sup, model_sup_letter
 
 @app.route('/add_nla', methods=['POST'])
 def add_nla():
-    global global_df, global_model, global_kmeans, global_unsaved_changes
+    global global_df, global_model, global_kmeans, global_unsaved_changes, global_current_sequence, global_model_nla, global_model_bb, global_model_letter
     if global_df is None:
         return redirect(url_for('index'))
 
@@ -589,11 +587,14 @@ def add_nla():
                 global_unsaved_changes = True
                 save_data_to_csv()
 
-    # Retrain model with updated df
+    # Retrain NLA model with updated df
     analysis = analyze_patterns(global_df)
-    generated_sequence, model, kmeans = generate_sequence(global_df)
-    global_model = model
-    global_kmeans = kmeans
+    nla_seq, model_nla, model_bb, model_letter = generate_nla_sequence(global_df)
+    global_model_nla = model_nla
+    global_model_bb = model_bb
+    global_model_letter = model_letter
+    # Update only NLA part of sequence
+    global_current_sequence.update(nla_seq)
 
     # Calculate last NLA and SUP6, and totals
     last_nla = None
@@ -616,11 +617,11 @@ def add_nla():
             last_sup6 = f"Draw# {int(last_sup6_row['Draw#'])}: {last_sup6_row['Sup1']} {last_sup6_row['Sup2']} {last_sup6_row['Sup3']} {last_sup6_row['Sup4']} {last_sup6_row['Sup5']} {last_sup6_row['Sup6']} Letter: {last_sup6_row['SupLetter']}"
             total_sup6 = len(sup6_rows)
 
-    return render_template('results.html', analysis=analysis, sequence=generated_sequence, message=message, last_nla=last_nla, last_sup6=last_sup6, total_nla=total_nla, total_sup6=total_sup6)
+    return render_template('results.html', analysis=analysis, sequence=global_current_sequence, message=message, last_nla=last_nla, last_sup6=last_sup6, total_nla=total_nla, total_sup6=total_sup6)
 
 @app.route('/add_sup6', methods=['POST'])
 def add_sup6():
-    global global_df, global_model, global_kmeans, global_unsaved_changes
+    global global_df, global_model, global_kmeans, global_unsaved_changes, global_current_sequence, global_model_sup, global_model_sup_letter
     if global_df is None:
         return redirect(url_for('index'))
 
@@ -664,12 +665,13 @@ def add_sup6():
                     message = f"New SUP6 draw {draw_val} added successfully."
                 global_unsaved_changes = True
 
-                # Retrain model with updated df and regenerate sequence
+                # Retrain SUP6 model with updated df and regenerate SUP6 sequence
                 analysis = analyze_patterns(global_df)
-                generated_sequence, model, kmeans = generate_sequence(global_df)
-                global_model = model
-                global_kmeans = kmeans
-                global_current_sequence = generated_sequence
+                sup6_seq, model_sup, model_sup_letter = generate_sup6_sequence(global_df)
+                global_model_sup = model_sup
+                global_model_sup_letter = model_sup_letter
+                # Update only SUP6 part of sequence
+                global_current_sequence['sup6'] = sup6_seq
 
                 # Calculate last NLA and SUP6, and totals
                 last_nla = None
@@ -692,7 +694,7 @@ def add_sup6():
                         last_sup6 = f"Draw# {int(last_sup6_row['Draw#'])}: {last_sup6_row['Sup1']} {last_sup6_row['Sup2']} {last_sup6_row['Sup3']} {last_sup6_row['Sup4']} {last_sup6_row['Sup5']} {last_sup6_row['Sup6']} Letter: {last_sup6_row['SupLetter']}"
                         total_sup6 = len(sup6_rows)
 
-                return render_template('results.html', analysis=analysis, sequence=generated_sequence, message=message, last_nla=last_nla, last_sup6=last_sup6, total_nla=total_nla, total_sup6=total_sup6)
+                return render_template('results.html', analysis=analysis, sequence=global_current_sequence, message=message, last_nla=last_nla, last_sup6=last_sup6, total_nla=total_nla, total_sup6=total_sup6)
             else:
                 message = "SUP6 must contain at least 6 numbers."
                 return render_template('results.html', analysis=analyze_patterns(global_df), sequence={'numbers': [], 'bb': 0, 'letter': 'A', 'sup6': None}, message=message, last_nla=None, last_sup6=None, total_nla=0, total_sup6=0)
@@ -701,7 +703,7 @@ def add_sup6():
 
 @app.route('/remove_nla', methods=['POST'])
 def remove_nla():
-    global global_df, global_model, global_kmeans, global_unsaved_changes
+    global global_df, global_model, global_kmeans, global_unsaved_changes, global_current_sequence
     if global_df is None:
         return redirect(url_for('index'))
 
@@ -733,7 +735,7 @@ def remove_nla():
 
 @app.route('/remove_sup6', methods=['POST'])
 def remove_sup6():
-    global global_df, global_model, global_kmeans, global_unsaved_changes
+    global global_df, global_model, global_kmeans, global_unsaved_changes, global_current_sequence
     if global_df is None:
         return redirect(url_for('index'))
 
@@ -1079,7 +1081,7 @@ def save():
     global global_df, global_unsaved_changes, global_csv_path
     if global_df is not None:
         try:
-            save_path = global_csv_path if global_csv_path else r'C:\Users\jomal\OneDrive\Documents\reconstructed_lotto.csv'
+            save_path = global_csv_path if global_csv_path else SAVE_PATH
             convert_df_to_sample_format(global_df).to_csv(save_path, index=False)
             global_unsaved_changes = False
             return {'status': 'success', 'message': 'Data saved successfully.'}
@@ -1093,6 +1095,50 @@ def download():
     if global_csv_path and os.path.exists(global_csv_path):
         return send_file(global_csv_path, as_attachment=True, download_name='updated_lotto_data.csv')
     return "No file available for download."
+
+@app.route('/recalibrate', methods=['POST'])
+def recalibrate():
+    global global_df, global_current_sequence, global_model_nla, global_model_bb, global_model_letter, global_model_sup, global_model_sup_letter
+    if global_df is None:
+        return redirect(url_for('index'))
+
+    # Regenerate NLA sequence
+    nla_seq, model_nla, model_bb, model_letter = generate_nla_sequence(global_df)
+    global_model_nla = model_nla
+    global_model_bb = model_bb
+    global_model_letter = model_letter
+    global_current_sequence.update(nla_seq)
+
+    # Regenerate SUP6 sequence
+    sup6_seq, model_sup, model_sup_letter = generate_sup6_sequence(global_df)
+    global_model_sup = model_sup
+    global_model_sup_letter = model_sup_letter
+    global_current_sequence['sup6'] = sup6_seq
+
+    analysis = analyze_patterns(global_df)
+
+    # Calculate last NLA and SUP6, and totals
+    last_nla = None
+    last_sup6 = None
+    total_nla = 0
+    total_sup6 = 0
+
+    if not global_df.empty:
+        # Last NLA: row with max Draw
+        nla_rows = global_df[global_df['Draw'].notna()]
+        if not nla_rows.empty:
+            last_nla_row = nla_rows.loc[nla_rows['Draw'].idxmax()]
+            last_nla = f"Draw {int(last_nla_row['Draw'])}: {int(last_nla_row['Num1'])} {int(last_nla_row['Num2'])} {int(last_nla_row['Num3'])} {int(last_nla_row['Num4'])} {int(last_nla_row['Num5'])} BB: {int(last_nla_row['BB'])} Letter: {last_nla_row['Letter']}"
+            total_nla = len(nla_rows)
+
+        # Last SUP6: row with max Draw#
+        sup6_rows = global_df[global_df['Draw#'].notna()]
+        if not sup6_rows.empty:
+            last_sup6_row = sup6_rows.loc[sup6_rows['Draw#'].idxmax()]
+            last_sup6 = f"Draw# {int(last_sup6_row['Draw#'])}: {last_sup6_row['Sup1']} {last_sup6_row['Sup2']} {last_sup6_row['Sup3']} {last_sup6_row['Sup4']} {last_sup6_row['Sup5']} {last_sup6_row['Sup6']} Letter: {last_sup6_row['SupLetter']}"
+            total_sup6 = len(sup6_rows)
+
+    return render_template('results.html', analysis=analysis, sequence=global_current_sequence, last_nla=last_nla, last_sup6=last_sup6, total_nla=total_nla, total_sup6=total_sup6)
 
 @app.route('/exit')
 def exit_app():
